@@ -8,7 +8,6 @@ import (
 	"log"
 	"net/http"
 	"os"
-	"sync"
 	"time"
 
 	"github.com/bsm/redislock"
@@ -17,24 +16,34 @@ import (
 )
 
 type RequestCounter struct {
-	c      map[string]*http.Cookie
 	redis  *redis.Client
 	locker *redislock.Client
-	mu     sync.RWMutex
 }
 
 func NewRequestCounter(rdb *redis.Client) *RequestCounter {
 	return &RequestCounter{
-		c:      make(map[string]*http.Cookie),
 		redis:  rdb,
 		locker: redislock.New(rdb),
-		mu:     sync.RWMutex{},
 	}
 }
 
+func (rc *RequestCounter) GetUniqReqCount() int {
+	ctx := context.Background()
+	count := 0
+	iter := rc.redis.Scan(ctx, 0, "*", 0).Iterator()
+	for iter.Next(ctx) {
+		if iter.Val() != "my-key" {
+			count++
+			log.Println("key ", iter.Val())
+		}
+	}
+	if err := iter.Err(); err != nil {
+		panic(err)
+	}
+	return count
+}
+
 func (rc *RequestCounter) Reset(t time.Time) {
-	// rc.mu.Lock()
-	// defer rc.mu.Unlock()
 	ctx := context.Background()
 	// Try to obtain lock.
 	lock, err := rc.locker.Obtain(ctx, "my-key", 5000*time.Millisecond, nil)
@@ -82,9 +91,6 @@ func (rc *RequestCounter) CheckCookie(key string) bool {
 	}
 	fmt.Printf("key has value %s\n", result)
 	return true
-	// if _, ok := rc.c[key]; !ok {
-	// 	return false
-	// }
 }
 
 func (rc *RequestCounter) UpdateCounter(cookie *http.Cookie) {
@@ -93,12 +99,9 @@ func (rc *RequestCounter) UpdateCounter(cookie *http.Cookie) {
 		fmt.Println("Failed to add key-value pair", err)
 		return
 	}
-	// rc.c[cookie.Value] = cookie
 }
 
 func (rc *RequestCounter) HandleCookie(w http.ResponseWriter, r *http.Request, id string) {
-	// rc.mu.Lock()
-	// defer rc.mu.Unlock()
 
 	ctx := context.Background()
 	// Try to obtain lock.
@@ -187,7 +190,7 @@ func (h *Handler) VerveAccept(w http.ResponseWriter, r *http.Request, urlParams 
 	h.rc.HandleCookie(w, r, id)
 
 	endpoint := r.URL.Query().Get("endpoint")
-	result, err := h.service.Accept(id, endpoint, len(h.rc.c))
+	result, err := h.service.Accept(id, endpoint, h.rc.GetUniqReqCount())
 	if err != nil {
 		api.Error(w, r, err, 0)
 		return
